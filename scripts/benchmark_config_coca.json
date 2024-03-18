@@ -1,0 +1,9 @@
+{
+    "models": {
+        "moondream2": {
+            "path":"/p/fastdata/mmlaion/marianna/models/moondream2",
+            "image_size": 378
+        }
+    }
+
+}

@@ -11,6 +11,18 @@ test_deps = [
     "black>=21.7b0"
 ]
 
+deps = [
+    "matplotlib>=3.4.3",
+    "open_clip_torch",
+    "pandas>=1.3.2",
+    "scikit-learn>=0.24.2",
+    "transformers>=4.9.2",
+    "torch>=1.9.0",
+    "torchvision>=0.10.0",
+    "sglang[all]",
+    "llava-torch"
+]
+
 serve_deps = [
     "dploy-kickstart>=0.1.5",
 ]
@@ -18,14 +30,14 @@ serve_deps = [
 extras = {"test": test_deps, "serve": serve_deps}
 
 setup(
-    name="ml-skeleton-py",
+    name="caption-the-internet",
     version="0.1.0",
     url="dataroots.io",
     author="dataroots.io",
     author_email="info@dataroots.io",
     description="Description of my ml-skeleton package",
     packages=find_packages(),
-    install_requires=["pandas>=1.3.2", "scikit-learn>=0.24.2"],
+    install_requires=deps,
     tests_require=test_deps,
     extras_require=extras,
 )

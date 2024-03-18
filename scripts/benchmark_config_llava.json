@@ -1,0 +1,9 @@
+{
+    "models": {
+        "llava-v1.6-mistral-7b": {
+            "path":"/p/fastdata/mmlaion/marianna/models/llava-v1.6-mistral-7b",
+            "conv_mode": "mistral_instruct",
+            "image_size": 336
+        }
+    }
+}

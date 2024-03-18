@@ -1,0 +1,27 @@
+{
+    "models": {
+        "llava-v1.6-mistral-7b": {
+            "path":"/p/fastdata/mmlaion/marianna/models/llava-v1.6-mistral-7b",
+            "conv_mode": "mistral_instruct",
+            "image_size": 336
+        },
+        "cogvlm-chat-hf": {
+            "path":"/p/fastdata/mmlaion/marianna/models/cogvlm-chat-hf",
+            "image_size": 490
+        },
+        "moondream2": {
+            "path":"/p/fastdata/mmlaion/marianna/models/moondream2",
+            "image_size": 378
+        },
+        "coca_ViT-L-14": {
+            "path":"/p/fastdata/mmlaion/marianna/models/CoCa-ViT-L-14-laion2B-s13B-b90k/open_clip_pytorch_model.bin",
+            "image_size": 224
+        },
+        "llava-v1.6-34b": {
+            "path":"/p/fastdata/mmlaion/marianna/models/llava-v1.6-34b",
+            "conv_mode": "chatml_direct",
+            "image_size": 336
+        }
+    }
+
+}
