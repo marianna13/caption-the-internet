@@ -6,7 +6,7 @@
 ![](https://scontent.fbru1-1.fna.fbcdn.net/v/t1.0-9/94305647_112517570431823_3318660558911176704_o.png?_nc_cat=111&_nc_sid=e3f864&_nc_ohc=-spbrtnzSpQAX_qi7iI&_nc_ht=scontent.fbru1-1.fna&oh=483d147a29972c72dfb588b91d57ac3c&oe=5F99368A "Logo")
 
 
-# `Caption the internet`
+# Caption the internet
 
 
 ## Objective
@@ -19,6 +19,7 @@ Generate synthetic captions for images, audio and videos to create better datase
 
 You can examine how many resources (gpu memory, number of gpu hrs) you would need to caption images using set of models and how good those captioners are (e.g. using ClipScore). See [benchmark_config.json](scripts/benchmark_config.json) for details.
 
-![Eval time comparision](image.png)
+![image](https://github.com/marianna13/caption-the-internet/assets/43296932/6e26bf9a-f270-4122-be74-90acb7b005ec)
+
 
 
