@@ -20,22 +20,23 @@ deps = [
     "torch>=1.9.0",
     "torchvision>=0.10.0",
     "sglang[all]",
-    "llava-torch"
+    "llava-torch",
+    "ruff>=0.1.5"
 ]
 
 serve_deps = [
     "dploy-kickstart>=0.1.5",
 ]
 
-extras = {"test": test_deps, "serve": serve_deps}
+
+extras = {"test": test_deps + quality, "serve": serve_deps}
 
 setup(
     name="caption-the-internet",
     version="0.1.0",
-    url="dataroots.io",
-    author="dataroots.io",
-    author_email="info@dataroots.io",
-    description="Description of my ml-skeleton package",
+    author="Marianna Nezhurina",
+    author_email="m.nezhurina@fz-juelich.de",
+    description="Caption the images with variuous models",
     packages=find_packages(),
     install_requires=deps,
     tests_require=test_deps,
