@@ -1,8 +1,8 @@
 {
     "models": {
-        "moondream2": {
-            "path":"/p/fastdata/mmlaion/marianna/models/moondream2",
-            "image_size": 378
+        "coca_ViT-L-14": {
+            "path":"/p/fastdata/mmlaion/marianna/models/CoCa-ViT-L-14-laion2B-s13B-b90k/open_clip_pytorch_model.bin",
+            "image_size": 224
         }
     }
 
