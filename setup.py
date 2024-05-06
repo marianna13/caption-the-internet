@@ -16,7 +16,7 @@ deps = [
     "open_clip_torch",
     "pandas>=1.3.2",
     "scikit-learn>=0.24.2",
-    "transformers>=4.9.2",
+    "transformers>=4.39.2",
     "torch>=1.9.0",
     "torchvision>=0.10.0",
     "sglang[all]",
