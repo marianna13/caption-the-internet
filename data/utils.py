@@ -69,10 +69,10 @@ def get_data_pipeline(
             wds.split_by_worker,
             wds.tarfile_to_samples(handler=log_and_continue),
             wds.split_by_worker,
-            wds.shuffle(
-                bufsize=_SAMPLE_SHUFFLE_SIZE,
-                initial=_SAMPLE_SHUFFLE_INITIAL,
-            ),
+            # wds.shuffle(
+            #     bufsize=_SAMPLE_SHUFFLE_SIZE,
+            #     initial=_SAMPLE_SHUFFLE_INITIAL,
+            # ),
             wds.decode("pil", handler=log_and_continue),
             wds.rename(image="jpg;webp;jpeg;png", handler=log_and_continue),
             # wds.to_tuple("image", "json", "__key__"),
@@ -101,7 +101,11 @@ def write_shard_wds(
 ):
     """Write a shard of samples to a WebDataset tar file."""
     pattern = os.path.join(base, "%08d.tar")
-    stats_json = os.path.join(base, "stats_00.json")
+    stats_txt = os.path.join(base, "stats.txt")
+
+    seen_urls = set()
+    num_seen_urls = 1
+
 
     with wds.ShardWriter(
         pattern, maxsize=int(maxsize), maxcount=int(maxcount), start_shard=start
@@ -118,9 +122,17 @@ def write_shard_wds(
             # print(len(batch), len(batch[0]), len(batch[0][0]))
 
             if process_samples is not None:
-                batch = process_samples(batch)
+                try:
+                    batch = process_samples(batch)
+                except Exception as e:
+                    logging.warning(f"Error processing samples: {e}")
+                    continue
 
             for images, jsons, keys, urls in batch:
+                # set_urls = list(set(urls))
+                
+                
+                # print(set(urls), len(urls), os.environ["SLURM_NODEID"], os.environ["RANK"])
                 for image, json_data, key, url in zip(images, jsons, keys, urls):
                     sample = {
                         "jpg": image,
@@ -134,21 +146,25 @@ def write_shard_wds(
                         logging.warning(f"Error writing sample: {e}")
                         continue
                     del sample
-                    size_of_pil_image_bytes = len(image.tobytes())
-                    stats["count"] += 1
-                    stats["id"].append(json_data["uid"])
-                    stats["original_caption"].append(json_data["caption"])
-                    stats["url"].append(url)
-                    stats["img_size"].append(size_of_pil_image_bytes)
+                    # size_of_pil_image_bytes = len(image.tobytes())
+                    # stats["count"] += 1
+                    # stats["id"].append(json_data["uid"])
+                    # stats["original_caption"].append(json_data["caption"])
+                    # stats["url"].append(url)
+                    # stats["img_size"].append(size_of_pil_image_bytes)
 
-            with open(stats_json, "w") as f:
-                json.dump(stats, f, indent=4)
-            stats_json = os.path.join(base, f"stats_{i+1:02d}.json")
-            stats = {
-                "count": 0,
-                "id": [],
-                "original_caption": [],
-                "url": [],
-                "img_size": [],
-            }
-        logging.info(f"Processed in: {time.time() - s}.", end="\r")
+
+                set_urls = sorted(list(set(urls)))
+                seen_urls.update(set_urls)
+
+                if len(seen_urls) > num_seen_urls:
+                    stats_file = open(stats_txt, "a")
+                    stats_file.write(f'{set_urls[0]}\n')
+                    stats_file.close()
+                num_seen_urls = len(seen_urls)
+            
+        
+        
+
+        # with open(stats_json, "w") as f:
+        #     json.dump(stats, f, indent=4)
