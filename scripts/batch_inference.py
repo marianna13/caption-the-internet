@@ -2,6 +2,7 @@ from benchmark_captioners import load_hf_model, get_captioner_func
 import argparse
 import webdataset as wds
 import json
+import glob
 import os
 import braceexpand
 from accelerate import PartialState
@@ -58,6 +59,32 @@ class BatchProcessor:
             js["url"] = url
         return batch
 
+def get_last_processed_shard(output_dir):
+    '''
+    Each shard is assigned id (0,1, …, N)
+    Each subshard has the name {shard_id}_{subshard_id}.tar.
+    After each shard is fully processed save {shard_id}_stats.json
+    When starting, check which id was processed the last (if not applicable assign start_id=0) by checking existing stats.json.
+    '''
+    stats_jsons = glob.glob(f"{output_dir}/*_stats.json")
+    done_shard_ids = [int(stats_json.split("/")[-1].split("_")[0]) for stats_json in stats_jsons]
+    done_shard_ids.sort()
+    return done_shard_ids[-1]
+
+def get_done_urls(output_dir):
+    '''
+    Each shard is assigned id (0,1, …, N)
+    Each subshard has the name {shard_id}_{subshard_id}.tar.
+    After each shard is fully processed save {shard_id}_stats.json
+    When starting, check which id was processed the last (if not applicable assign start_id=0) by checking existing stats.json.
+    '''
+    stats_txt = glob.glob(f"{output_dir}/**/stats.txt", recursive=True)
+    done_urls = set()
+    for stats in stats_txt:
+        with open(stats, "r") as f:
+            done_urls.update(f.read().split("\n"))
+
+    return done_urls
 
 def main():
     parser = argparse.ArgumentParser()
@@ -82,7 +109,8 @@ def main():
     parser.add_argument("--max_new_tokens", type=int, default=1024)
     parser.add_argument("--output_dir", type=str, default="output")
     parser.add_argument("--rank", type=int, default=0)
-    parser.add_argument("--num_güus", type=int, default=1)
+    parser.add_argument("--device_map", type=str, default="auto")
+    parser.add_argument("--limit", type=int, default=None)
 
     slurm_node_id = int(os.environ.get("SLURM_NODEID"))
 
@@ -98,8 +126,8 @@ def main():
     distributed_state = PartialState()
 
     args.device_map = distributed_state.device
+
     args.rank = int(os.environ.get("LOCAL_RANK", -1))
-    print(int(os.environ["RANK"]), int(os.environ["WORLD_SIZE"]))
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         group = torch.distributed.group.WORLD
         rank = torch.distributed.get_rank(group=group)
@@ -114,7 +142,22 @@ def main():
     )
 
     captioner_func = get_captioner_func(args.captioner)
-    args.wds_path = list(braceexpand.braceexpand(args.wds_path))
+    if '..' in args.wds_path:
+        args.wds_path = list(braceexpand.braceexpand(args.wds_path))
+    elif os.path.isdir(args.wds_path):
+        args.wds_path = glob.glob(f"{args.wds_path}/**/*.tar", recursive=True)
+    else:
+        args.wds_path = [args.wds_path]
+
+    limit = args.limit
+    print("limit:", limit)
+    if limit:
+        args.wds_path = args.wds_path[:limit]
+    done_urls = get_done_urls(args.output_dir)
+
+    args.wds_path = [wds_url for wds_url in args.wds_path if wds_url not in done_urls]
+
+    args.wds_path.sort()
     print(len(args.wds_path))
 
     slurm_node_id = int(os.environ.get("SLURM_NODEID"))
@@ -124,6 +167,8 @@ def main():
 
     output_dir = f"{args.output_dir}/{slurm_node_id:02d}_{args.rank:02d}"
     os.makedirs(output_dir, exist_ok=True)
+
+    # shard_id = get_last_processed_shard(output_dir)
 
     # output_path = f"{output_dir}/{shard_id:08d}.tar"
     batch_processor = BatchProcessor(
@@ -135,12 +180,14 @@ def main():
         config=MODELS_DICT[args.captioner],
     )
 
+
     dataset = get_data_pipeline(args.wds_path, batch_size=args.batch_size)
     # dataloader = torch.utils.data.DataLoader(dataset, shuffle=False, collate_fn=lambda x: x)
     dataloader = wds.WebLoader(dataset, shuffle=False, collate_fn=lambda x: x)
     write_shard_wds(
         output_dir, dataloader, process_samples=batch_processor, maxcount=20000
     )
+    print("Done")
 
 
 if __name__ == "__main__":
