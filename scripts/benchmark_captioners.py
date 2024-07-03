@@ -1,6 +1,8 @@
 from transformers import (
     AutoTokenizer,
+    AutoModel,
     AutoModelForCausalLM,
+    AutoProcessor,
     StoppingCriteria,
     StoppingCriteriaList,
 )
@@ -285,6 +287,42 @@ def cogvlm_eval(
     images_processed = torch.stack(images_processed)
     return outputs_list, images_processed
 
+def florence_eval(
+    model,
+    model_name,
+    tokenizer,
+    images,
+    args,
+    stopping_criteria=None,
+    max_new_tokens=1024,
+    image_processor=None,
+    config=None,
+):
+
+    task_prompt = '<MORE_DETAILED_CAPTION>'
+    prompt = task_prompt + args.prompt
+    print(prompt)
+    inputs = image_processor(text=[task_prompt]*len(images), images=images, return_tensors="pt").to(DEVICE, dtype=torch.float16)
+    print(inputs["pixel_values"].shape)
+    generated_ids = model.generate(
+      input_ids=inputs["input_ids"],
+      pixel_values=inputs["pixel_values"],
+      max_new_tokens=max_new_tokens,
+      early_stopping=False,
+      do_sample=True,
+      num_beams=3,
+    )
+
+    generated_text = image_processor.batch_decode(generated_ids, skip_special_tokens=False)
+   
+    parsed_answer = [image_processor.post_process_generation(
+        text, 
+        task=task_prompt, 
+        image_size=(images[0].width, images[0].height)
+    )[task_prompt].replace("<pad>", "").strip() for text in generated_text]
+    print(parsed_answer)
+
+    return parsed_answer, inputs["pixel_values"]
 
 def llava_eval(
     model,
@@ -350,6 +388,117 @@ def llava_eval(
     ]
 
     return outputs, images
+
+def get_tgt_sizes(images, patch_size):
+    tgt_sizes = []
+    for image in images:
+        tgt_sizes.append(torch.Tensor(image.shape[0] // patch_size, image.shape[1] // patch_size))
+    return tgt_sizes
+
+
+def minicpmv_eval(
+    model,
+    model_name,
+    tokenizer,
+    images,
+    args,
+    stopping_criteria=None,
+    max_new_tokens=1024,
+    image_processor=None,
+    config=None,
+):
+    # prompt = tokenizer.im_start \
+    #         + tokenizer.unk_token * model.config.query_num \
+    #         + tokenizer.im_end + "\n" + args.prompt
+    # print(prompt)
+
+    # test chat
+    # copy images to avoid modifying the original images
+    images_copy = list(images).copy()
+    # convert to tensor
+    images_copy = torch.stack([torch.tensor(np.array(img.resize((100,100)))) for img in images_copy])
+
+    model = model.to(device='cuda')
+    model.eval()
+    model = model.to(dtype=torch.float16)
+
+
+    copy_msgs = [{"role": "user", "content": [image.convert('RGB'), args.prompt]} for image in images]
+
+    images = []
+    tgt_sizes = []
+    input_ids_list = []
+    images_list = []
+    tgt_sizes_list = []
+    for i, msg in enumerate(copy_msgs):
+        role = msg["role"]
+        content = msg["content"]
+
+        if isinstance(content, str):
+            content = [content]
+
+        cur_msgs = []
+        for c in content:
+            if isinstance(c, Image.Image):
+                image = c
+                if model.config.slice_mode:
+                    slice_images, image_placeholder = model.get_slice_image_placeholder(
+                        image, tokenizer
+                    )
+                    cur_msgs.append(image_placeholder)
+                    for slice_image in slice_images:
+                        slice_image = model.transform(slice_image)
+                        H, W = slice_image.shape[1:]
+                        images.append(model.reshape_by_patch(slice_image))
+                        tgt_sizes.append(torch.Tensor([H // model.config.patch_size, W // model.config.patch_size]).type(torch.int32))
+                else:
+                    images.append(model.transform(image))
+                    cur_msgs.append(
+                        tokenizer.im_start
+                        + tokenizer.unk_token * model.config.query_num
+                        + tokenizer.im_end
+                    )
+            elif isinstance(c, str):
+                cur_msgs.append(c)
+        
+        msg['content'] = '\n'.join(cur_msgs)
+        images_list.append(images)
+        images = []
+
+        if tgt_sizes:
+            # tgt_sizes = torch.vstack(tgt_sizes)
+            tgt_sizes_list.append(torch.vstack(tgt_sizes))
+            tgt_sizes = []
+        
+
+    
+    # input_ids = tokenizer.apply_chat_template(copy_msgs, tokenize=True, add_generation_prompt=False)
+    input_ids_list = [tokenizer.apply_chat_template([msg], tokenize=True, add_generation_prompt=False) for msg in copy_msgs]
+
+
+    generation_config = {
+                "top_p": 0.8,
+                "top_k": 100,
+                "temperature": 0.7,
+                "do_sample": True,
+                "repetition_penalty": 1.05
+            }
+
+
+
+    with torch.inference_mode():
+            outputs = model.generate(
+                input_id_list=input_ids_list,
+                img_list=images_list,
+                tokenizer=tokenizer,
+                max_new_tokens=max_new_tokens,
+                return_vision_hidden_states=False,
+                tgt_sizes=tgt_sizes_list,
+                **generation_config
+            )
+
+    return outputs, images_copy
+
 
 
 def coca_eval(
@@ -511,6 +660,7 @@ def load_hf_model(model_name, args, model_path):
         )
     elif "llava" in model_name:
         model_name = get_model_name_from_path(model_path)
+        print(args.device_map)
         tokenizer, model, image_processor, context_len = load_pretrained_model(
             model_name=model_name,
             model_path=model_path,
@@ -558,7 +708,7 @@ def load_hf_model(model_name, args, model_path):
     elif "deepseek" in model_name:
         model = AutoModelForCausalLM.from_pretrained(
             model_path,
-            trust_remote_code=True,
+            # trust_remote_code=True,
             load_in_4bit=args.quant == 4,
             load_in_8bit=args.quant == 8,
             bnb_4bit_compute_dtype=torch.bfloat16
@@ -568,7 +718,28 @@ def load_hf_model(model_name, args, model_path):
         image_processor: VLChatProcessor = VLChatProcessor.from_pretrained(model_path)
         tokenizer = image_processor.tokenizer
         # model = model.to(dtype).cuda()
-
+    elif "minicpmv" in model_name:
+        model = AutoModel.from_pretrained(
+            model_path, 
+            trust_remote_code=True, 
+            # torch_dtype=torch.float16,
+            load_in_4bit=args.quant == 4,
+            load_in_8bit=args.quant == 8
+            )
+        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    elif "florence" in model_name:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            trust_remote_code=True,
+            load_in_4bit=True,
+            # load_in_8bit=args.quant == 8,
+            # bnb_4bit_compute_dtype=torch.bfloat16
+            # if (args.bf16 or args.quant == 4)
+            # else torch.float32,
+        )
+        # model = model.to(DEVICE)
+        image_processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+        tokenizer = None
     # try:
     #     model = model.to(DEVICE, dtype=dtype)
     # except:
@@ -710,6 +881,10 @@ def get_captioner_func(m):
         eval_fn = coca_eval
     elif "deepseek" in m:
         eval_fn = deepseek_eval
+    elif "minicpmv" in m:
+        eval_fn = minicpmv_eval
+    elif "florence" in m:
+        eval_fn = florence_eval
     else:
         raise ValueError(f"Model {m} not found")
     return eval_fn
@@ -735,6 +910,7 @@ if __name__ == "__main__":
     args.add_argument("--config", type=str, default="config.json")
     args.add_argument("--max_new_tokens", type=int, default=1024)
     args.add_argument("--num_images_to_plot", type=int, default=5)
+    args.add_argument("--device_map", type=str, default="auto")
 
     args = args.parse_args()
 
@@ -754,6 +930,10 @@ if __name__ == "__main__":
             eval_fn = coca_eval
         elif "deepseek" in m:
             eval_fn = deepseek_eval
+        elif "minicpmv" in m:
+            eval_fn = minicpmv_eval
+        elif "florence" in m:
+            eval_fn = florence_eval
         else:
             raise ValueError(f"Model {m} not found")
 
