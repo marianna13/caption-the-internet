@@ -1,0 +1,7 @@
+{
+    "models": {
+        "florence-2-large-ft": {
+            "path": "/p/data1/mmlaion/marianna/models/Florence-2-large-ft"
+        }
+    }
+}
