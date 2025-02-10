@@ -8,18 +8,9 @@
 
 # Caption the internet
 
-
 ## Objective
 
-Generate synthetic captions for images, audio and videos to create better datasets.
-
-## Usage
-
-### Benchmark different captioner model to select best ones: [benchmark.sh](scripts/benchmark.sh)
-
-You can examine how many resources (gpu memory, number of gpu hrs) you would need to caption images using set of models and how good those captioners are (e.g. using ClipScore). See [benchmark_config.json](scripts/benchmark_config.json) for details.
-
-![image](https://github.com/marianna13/caption-the-internet/assets/43296932/6e26bf9a-f270-4122-be74-90acb7b005ec)
+Generate synthetic captions for images to create better datasets.
 
 
 

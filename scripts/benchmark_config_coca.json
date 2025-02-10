@@ -1,9 +1,0 @@
-{
-    "models": {
-        "coca_ViT-L-14": {
-            "path":"/p/fastdata/mmlaion/marianna/models/CoCa-ViT-L-14-laion2B-s13B-b90k/open_clip_pytorch_model.bin",
-            "image_size": 224
-        }
-    }
-
-}
