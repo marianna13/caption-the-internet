@@ -1,0 +1,20 @@
+[project]
+name = "caption-the-internet"
+version = "2025.0.0"
+
+
+dependencies = [
+  "vllm",
+  "webdataset",
+  "ray",
+  "opencv-python",
+  "transformers",
+  "open_clip_torch"
+]
+
+readme = "README.md"
+
+[project.optional-dependencies]
+test = [
+    "pytest"
+]
