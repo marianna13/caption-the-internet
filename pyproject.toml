@@ -18,3 +18,6 @@ readme = "README.md"
 test = [
     "pytest"
 ]
+format = [
+  "ruff"
+]
