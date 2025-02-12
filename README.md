@@ -11,5 +11,15 @@
 
 Generate synthetic captions for images to create better datasets.
 
+## Install
+
+```bash
+git clone 
+cd caption-the-internet
+pip install -e .
+```
+
+## Usage
+
 
 

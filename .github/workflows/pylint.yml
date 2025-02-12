@@ -21,3 +21,7 @@ jobs:
     - name: Analysing the code with pylint
       run: |
         ruff check $(git ls-files '*.py')
+``` - name: Run tests
+      run: |
+        python -m pip instal pytest
+        pytest tests/
