@@ -1,9 +1,7 @@
 from vllm import LLM, SamplingParams
 from open_clip_models import OpenClipModel
 import fire
-from data import get_data_loader
-from writer import ParquetSampleWriter
-from viz import plot_grid
+from visualization import plot_grid
 import pyarrow as pa
 import ray
 import shutil
@@ -12,6 +10,26 @@ import glob
 import torch
 from tqdm import tqdm
 from clip_score_utils import ClipScoreProcessor
+from prompts import PROMPT_MAP
+from extra_args import EXTRA_ARGS_MAP
+from vllm.distributed import destroy_model_parallel, destroy_distributed_environment
+import gc
+import contextlib
+from data_routines.data import get_data_loader
+from data_routines.writer import ParquetSampleWriter
+
+
+def cleanup_vllm(llm):
+    destroy_model_parallel()
+    destroy_distributed_environment()
+    del llm.llm_engine.model_executor
+    del llm
+    with contextlib.suppress(AssertionError):
+        torch.distributed.destroy_process_group()
+
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
 
 
 def get_done_shards(tmp_dir):
@@ -20,6 +38,58 @@ def get_done_shards(tmp_dir):
         if f.endswith(".feather"):
             done_shards.append(f.split(".")[0])
     return done_shards
+
+
+def get_clipscores(
+    data_path,
+    parquet_path,
+    clip_model="openai/clip-vit-base-patch32",
+    meta_key="info.json",
+    img_key="image",
+    output_dir="output",
+    shard_id=0,
+    batch_size=32,
+):
+    print(f"Computing CLIP scores with model: {clip_model}")
+
+    clip_score = ClipScoreProcessor(clip_model)
+    dataloader = get_data_loader(
+        data_path, batch_size=batch_size, num_workers=4, meta_key=meta_key
+    )
+
+    metadata_pq = pa.parquet.read_table(parquet_path).to_pandas()
+    print(metadata_pq)
+
+    images, captions = [], []
+
+    for batch_id, batch in tqdm(enumerate(dataloader)):
+        if batch_id > 0:
+            break
+
+        for i, b in enumerate(batch):
+            row = metadata_pq.iloc[i]
+            row = row.to_dict()
+            img = b["image"]
+            caption = row["txt"]
+            captions.append(caption)
+            images.append(img)
+
+    n_col = 4
+    n_row = (
+        len(images) // n_col if len(images) % n_col == 0 else len(images) // n_col + 1
+    )
+    plot_grid(
+        images,
+        n_col,
+        n_row,
+        captions,
+        orig_captions=None,
+        fig_path=os.path.join(output_dir, f"{shard_id}.png"),
+    )
+
+    clip_scores = clip_score(captions, images)
+    avg_score = sum(clip_scores) / len(clip_scores)
+    print(f"Average CLIP score: {avg_score:.2f}")
 
 
 @ray.remote(num_gpus=4, num_cpus=24)
@@ -38,6 +108,7 @@ def process_shard(
     num_workers=4,
     backend="vllm",
     compute_clip_score=False,
+    debug=False,
 ):
     model = get_model(model_path, rank, backend, tp)
     dataloader = get_data_loader(
@@ -63,17 +134,19 @@ def process_shard(
         encode_format="jpg",
     )
 
-    img_key = "image"
-    meta_key = "json"
-
     for batch_id, batch in tqdm(enumerate(dataloader)):
-        if batch_id > 0:
+        if debug and batch_id > 0:
             break
         print(batch[0].keys())
-        metas = [b[meta_key] for b in batch]
-        imgs = [b[img_key] for b in batch]
+        metas = [b["json"] for b in batch]
+        imgs = [b["image"] for b in batch]
         urls = [b["__url__"] for b in batch]
         keys = [b["__key__"] for b in batch]
+
+        if backend == "vllm":
+            sampling_params = SamplingParams(**sampling_params)
+            prompt_func = PROMPT_MAP["/".join(model_path.split("/")[-2:])]
+            prompt = prompt_func(prompt)
 
         inputs = [
             {
@@ -84,12 +157,12 @@ def process_shard(
             }
             for img in imgs
         ]
-        if backend == "vllm":
-            sampling_params = SamplingParams(**sampling_params)
         captions = model.generate(
             inputs,
             sampling_params=sampling_params,
         )
+
+        torch.cuda.empty_cache()
         captions = [c.outputs[0].text for c in captions]
         for i in range(len(imgs)):
             meta_data = metas[i]
@@ -101,35 +174,23 @@ def process_shard(
                 meta=meta_data,
             )
 
-        if compute_clip_score:
-            new_captions = []
-            clip_score = ClipScoreProcessor("openai/clip-vit-base-patch32")
-            scores = clip_score(captions, imgs)
-            print(scores)
-            avg_score = sum(scores) / len(scores)
-            print(f"Average CLIP score: {avg_score:.2f}")
-            for i in range(len(imgs)):
-                new_captions.append(f"{captions[i]} [CLIP score: {scores[i]:.2f}]")
-            # for i in range(len(imgs)):
-            #     score = clip_score(captions[i], imgs[i])
-            #     new_captions.append(
-            #         f"{captions[i]} [CLIP score: {score:.2f}]"
-            #     )
-            captions = new_captions
+    writer.close()
 
-        print(f"Processed {batch_id} batches")
-        print(os.path.join(output_dir, f"{shard_id}.png"))
-        plot_grid(
-            imgs,
-            4,
-            8,
-            captions,
-            orig_captions=None,
-            fig_path=os.path.join(output_dir, f"{shard_id}.png"),
+    if backend == "vllm":
+        cleanup_vllm(model)
+
+    if compute_clip_score:
+        get_clipscores(
+            data_path,
+            writer.pq_file,
+            meta_key=meta_key,
+            img_key=img_key,
+            output_dir=output_dir,
+            shard_id=shard_id,
         )
 
-        del imgs
-    writer.close()
+    print(f"Processed {batch_id} batches")
+    print(os.path.join(output_dir, f"{shard_id}.png"))
 
     tmp_dir = os.path.join(output_dir, "_tmp")
 
@@ -148,6 +209,9 @@ def get_model(model_path, rank, backend="vllm", tensor_parallel_size=1):
     """
 
     if backend == "vllm":
+        print("/".join(model_path.split("/")[-2:]))
+        extra_args = EXTRA_ARGS_MAP.get("/".join(model_path.split("/")[-2:]), {})
+        print(f"Extra args: {extra_args}")
         model = LLM(
             model=model_path,
             trust_remote_code=True,
@@ -155,6 +219,7 @@ def get_model(model_path, rank, backend="vllm", tensor_parallel_size=1):
             tensor_parallel_size=tensor_parallel_size,
             gpu_memory_utilization=0.98,
             max_num_seqs=1,
+            **extra_args,
         )
     elif backend == "open_clip":
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -179,6 +244,7 @@ def batch_inference(
     meta_key="info.json",
     backend="vllm",
     compute_clip_score=False,
+    debug=False,
 ):
     print(model_path)
 
@@ -187,10 +253,8 @@ def batch_inference(
         "temperature": temperature,
     }
 
-    # sampling_params = SamplingParams(**sampling_params)
-
     shards = glob.glob(f"{data_path}/*.tar")
-    shards = shards[:1]
+    shards = shards[:4]
 
     tmp_dir = os.path.join(output_dir, "_tmp")
     os.makedirs(tmp_dir, exist_ok=True)
@@ -202,11 +266,11 @@ def batch_inference(
         address="auto",
         # num_cpus=24,
         # num_gpus=cuda_devices,
-        # include_dashboard=False,
+        include_dashboard=False,
     )
 
     futures = [
-        process_shard.remote(
+        process_shard.options(num_gpus=4).remote(
             shard_id=shard_id,
             data_path=shards[shard_id],
             model_path=model_path,
@@ -218,6 +282,9 @@ def batch_inference(
             sampling_params=sampling_params,
             backend=backend,
             compute_clip_score=compute_clip_score,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            debug=debug,
         )
         for shard_id in range(len(shards))
         if f"{shard_id}" not in done_shards
