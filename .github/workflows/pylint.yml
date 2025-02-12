@@ -23,5 +23,5 @@ jobs:
         ruff check $(git ls-files '*.py')
     - name: Run tests
       run: |
-        python -m pip instal pytest
+        python -m pip install pytest
         pytest tests/
