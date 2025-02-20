@@ -12,7 +12,9 @@ dependencies = [
   "open_clip_torch",
   "pyyaml",
   "fire",
-  "matplotlib"
+  "matplotlib",
+  "pyarrow",
+  "fsspec"
 ]
 
 readme = "README.md"
