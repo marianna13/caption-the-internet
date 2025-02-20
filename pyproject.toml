@@ -9,7 +9,9 @@ dependencies = [
   "ray",
   "opencv-python",
   "transformers",
-  "open_clip_torch"
+  "open_clip_torch",
+  "pyyaml",
+  "fire"
 ]
 
 readme = "README.md"
