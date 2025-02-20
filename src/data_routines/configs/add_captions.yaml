@@ -1,0 +1,16 @@
+data_path: "/p/data1/mmlaion/datacomp/datacomp_1B/flat"
+output_dir: "/p/data1/mmlaion/laion_bvd_recap/filtered_test"
+batch_size: 128
+num_workers: 4
+meta_key: "json"
+img_key: "jpg"
+make_visualization: true
+save_tar: true
+convert_to_tuples: false
+mapper_functions: 
+- type: add_fields
+  input_key: "txt"
+  output_key: "new_caption"
+  metadata_path: "/p/data1/mmlaion/laion_bvd_recap/deepseek-ai/deepseek-vl2-tiny/"
+  data_path: "/p/data1/mmlaion/datacomp/datacomp_1B/flat"
+
