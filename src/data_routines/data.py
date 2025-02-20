@@ -70,7 +70,13 @@ def tarfile_to_samples_nothrow(src, handler=log_and_continue):
 
 
 def get_data_loader(
-    data_path, batch_size, num_workers, meta_key="info.json", filter_functions=None
+    data_path: str,
+    batch_size: int,
+    num_workers: int,
+    meta_key: str = "info.json",
+    filter_functions: list = None,
+    mapper_functions: list = None,
+    convert_to_tuples: bool = True,
 ):
     pipeline = [wds.SimpleShardList(data_path)]
     pipeline.extend(
@@ -85,10 +91,33 @@ def get_data_loader(
         for filter_function in filter_functions:
             pipeline.append(wds.select(filter_function))
 
+    extra_keys = set()
+    if mapper_functions is not None:
+        for mapper_function in mapper_functions:
+            output_key = mapper_function.config.output_key
+            extra_keys.add(output_key)
+            pipeline.append(wds.map(mapper_function))
+
+    if convert_to_tuples:
+        tuple_keys = ["image", "json", "__url__", "__key__"]
+        tuple_keys.extend(extra_keys)
+        pipeline.extend(
+            [
+                wds.to_tuple(*tuple_keys),
+            ]
+        )
+
+    pipeline.append(
+        wds.batched(
+            batch_size,
+            partial=False,
+        )
+    )
+
     dataset = wds.DataPipeline(*pipeline)
     dataloader = torch.utils.data.DataLoader(
         dataset,
-        batch_size=batch_size,
+        batch_size=None,
         num_workers=num_workers,
         collate_fn=lambda x: x,
     )

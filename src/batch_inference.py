@@ -17,6 +17,10 @@ import gc
 import contextlib
 from data_routines.data import get_data_loader
 from data_routines.writer import ParquetSampleWriter
+import logging
+import time
+
+logging.basicConfig(level=logging.INFO)
 
 
 def cleanup_vllm(llm):
@@ -50,7 +54,7 @@ def get_clipscores(
     shard_id=0,
     batch_size=32,
 ):
-    print(f"Computing CLIP scores with model: {clip_model}")
+    logging.info(f"Computing CLIP scores with model: {clip_model}")
 
     clip_score = ClipScoreProcessor(clip_model)
     dataloader = get_data_loader(
@@ -58,18 +62,16 @@ def get_clipscores(
     )
 
     metadata_pq = pa.parquet.read_table(parquet_path).to_pandas()
-    print(metadata_pq)
 
     images, captions = [], []
 
-    for batch_id, batch in tqdm(enumerate(dataloader)):
+    for batch_id, (imgs, _, _, _) in tqdm(enumerate(dataloader)):
         if batch_id > 0:
             break
 
-        for i, b in enumerate(batch):
+        for i, img in enumerate(imgs):
             row = metadata_pq.iloc[i]
             row = row.to_dict()
-            img = b["image"]
             caption = row["txt"]
             captions.append(caption)
             images.append(img)
@@ -89,7 +91,7 @@ def get_clipscores(
 
     clip_scores = clip_score(captions, images)
     avg_score = sum(clip_scores) / len(clip_scores)
-    print(f"Average CLIP score: {avg_score:.2f}")
+    logging.info(f"Average CLIP score: {avg_score:.2f}")
 
 
 @ray.remote(num_gpus=4, num_cpus=24)
@@ -108,6 +110,7 @@ def process_shard(
     num_workers=4,
     backend="vllm",
     compute_clip_score=False,
+    clip_model="openai/clip-vit-base-patch32",
     debug=False,
 ):
     model = get_model(model_path, rank, backend, tp)
@@ -125,8 +128,11 @@ def process_shard(
             pa.field("key", pa.string()),
         ]
     )
+
+    base_name = os.path.basename(data_path).replace(".tar", "")
+    print(f"Processing shard: {base_name}")
     writer = ParquetSampleWriter(
-        shard_id=shard_id,
+        shard_id=base_name,
         output_folder=output_dir,
         save_caption=True,
         oom_shard_count=0,
@@ -134,19 +140,9 @@ def process_shard(
         encode_format="jpg",
     )
 
-    for batch_id, batch in tqdm(enumerate(dataloader)):
+    for batch_id, (imgs, metas, urls, keys) in tqdm(enumerate(dataloader)):
         if debug and batch_id > 0:
             break
-        print(batch[0].keys())
-        metas = [b["json"] for b in batch]
-        imgs = [b["image"] for b in batch]
-        urls = [b["__url__"] for b in batch]
-        keys = [b["__key__"] for b in batch]
-
-        if backend == "vllm":
-            sampling_params = SamplingParams(**sampling_params)
-            prompt_func = PROMPT_MAP["/".join(model_path.split("/")[-2:])]
-            prompt = prompt_func(prompt)
 
         inputs = [
             {
@@ -166,6 +162,8 @@ def process_shard(
         captions = [c.outputs[0].text for c in captions]
         for i in range(len(imgs)):
             meta_data = metas[i]
+            if "key" in meta_data:
+                meta_data["key"] = keys[i]
             meta_data["url"] = urls[i]
             meta_data["prompt"] = prompt
             writer.write(
@@ -179,6 +177,8 @@ def process_shard(
     if backend == "vllm":
         cleanup_vllm(model)
 
+    logging.info(f"Computing CLIP scores for shard: {shard_id}")
+
     if compute_clip_score:
         get_clipscores(
             data_path,
@@ -187,10 +187,11 @@ def process_shard(
             img_key=img_key,
             output_dir=output_dir,
             shard_id=shard_id,
+            clip_model=clip_model,
         )
 
-    print(f"Processed {batch_id} batches")
-    print(os.path.join(output_dir, f"{shard_id}.png"))
+    logging.info(f"Processed {batch_id+1} batches")
+    logging.info(os.path.join(output_dir, f"{shard_id}.png"))
 
     tmp_dir = os.path.join(output_dir, "_tmp")
 
@@ -209,16 +210,15 @@ def get_model(model_path, rank, backend="vllm", tensor_parallel_size=1):
     """
 
     if backend == "vllm":
-        print("/".join(model_path.split("/")[-2:]))
         extra_args = EXTRA_ARGS_MAP.get("/".join(model_path.split("/")[-2:]), {})
-        print(f"Extra args: {extra_args}")
+        logging.warning(f"Extra args: {extra_args}")
         model = LLM(
             model=model_path,
             trust_remote_code=True,
             max_model_len=4096,
             tensor_parallel_size=tensor_parallel_size,
             gpu_memory_utilization=0.98,
-            max_num_seqs=1,
+            max_num_seqs=4,
             **extra_args,
         )
     elif backend == "open_clip":
@@ -231,46 +231,85 @@ def get_model(model_path, rank, backend="vllm", tensor_parallel_size=1):
 
 
 def batch_inference(
-    model_path,
-    data_path,
-    prompt,
-    max_tokens=128,
-    temperature=0.6,
-    tp=1,
-    batch_size=32,
-    num_workers=4,
-    output_dir="output",
-    img_key="image",
-    meta_key="info.json",
-    backend="vllm",
-    compute_clip_score=False,
-    debug=False,
+    model_path: str,
+    data_path: str,
+    prompt: str,
+    max_tokens: int = 128,
+    temperature: float = 0.6,
+    tp: int = 1,
+    dp: int = 1,
+    batch_size: int = 32,
+    num_workers: int = 4,
+    output_dir: str = "output",
+    img_key: str = "image",
+    meta_key: str = "info.json",
+    backend: str = "vllm",
+    compute_clip_score: bool = False,
+    clip_model: str = "openai/clip-vit-base-patch32",
+    debug: bool = False,
+    limit: int = None,
+    shuffle_shards: bool = False,
 ):
-    print(model_path)
+    """
+    Run batch inference on a dataset
+
+    Args:
+
+        model_path (str): Path to the model
+        data_path (str): Path to the dataset
+        prompt (str): Prompt to use
+        max_tokens (int): Maximum number of tokens to generate
+        temperature (float): Sampling temperature
+        tp (int): Tensor parallel size
+        dp (int): Data parallel size
+        batch_size (int): Batch size
+        num_workers (int): Number of webdataset loader workers
+        output_dir (str): Output directory
+        img_key (str): Key for the image data
+        meta_key (str): Key for the metadata
+        backend (str): Backend to use (vllm or open_clip)
+        compute_clip_score (bool): Whether to compute CLIP scores
+        clip_model (str): Model name or path to CLIP model to use for scoring
+        debug (bool): Debug mode
+        limit (int): Limit the number of shards to process
+    """
+
+    logging.info(f"Running batch inference with model: {model_path}")
+
+    s = time.time()
 
     sampling_params = {
         "max_tokens": max_tokens,
         "temperature": temperature,
     }
 
+    if backend == "vllm":
+        sampling_params = SamplingParams(**sampling_params)
+        prompt_func = PROMPT_MAP["/".join(model_path.split("/")[-2:])]
+        prompt = prompt_func(prompt)
+
     shards = glob.glob(f"{data_path}/*.tar")
-    shards = shards[:4]
+    logging.info(f"Found {len(shards)} shards")
+    cuda_devices = torch.cuda.device_count()
+    logging.info(f"Found {cuda_devices} cuda devices")
+    num_gpus_per_task = cuda_devices // dp
+    logging.info(f"Using {num_gpus_per_task} GPUs per task")
+    shards = shards[:limit] if limit is not None else shards
+    logging.info(f"Limiting to {len(shards)} shard(s)")
 
     tmp_dir = os.path.join(output_dir, "_tmp")
     os.makedirs(tmp_dir, exist_ok=True)
 
     done_shards = get_done_shards(tmp_dir)
-    cuda_devices = torch.cuda.device_count()
-    print(f"Found {cuda_devices} cuda devices")
-    ray.init(
-        address="auto",
-        # num_cpus=24,
-        # num_gpus=cuda_devices,
-        include_dashboard=False,
-    )
+    print(done_shards)
+
+    try:
+        ray.init(address="auto", include_dashboard=False)
+    except ConnectionError:
+        ray.init(include_dashboard=False)
 
     futures = [
-        process_shard.options(num_gpus=4).remote(
+        process_shard.options(num_gpus=num_gpus_per_task, num_cpus=10).remote(
             shard_id=shard_id,
             data_path=shards[shard_id],
             model_path=model_path,
@@ -282,6 +321,7 @@ def batch_inference(
             sampling_params=sampling_params,
             backend=backend,
             compute_clip_score=compute_clip_score,
+            clip_model=clip_model,
             batch_size=batch_size,
             num_workers=num_workers,
             debug=debug,
@@ -294,6 +334,9 @@ def batch_inference(
 
     ray.shutdown()
     shutil.rmtree(tmp_dir)
+
+    e = time.time()
+    logging.info(f"Total time: {e-s:.2f}s")
 
 
 if __name__ == "__main__":

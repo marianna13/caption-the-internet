@@ -1,6 +1,7 @@
 import pyarrow as pa
 import pyarrow.parquet as pq
 import fsspec
+import webdataset as wds
 
 
 class BufferedParquetWriter:
@@ -59,9 +60,7 @@ class ParquetSampleWriter:
     ):
         self.oom_shard_count = oom_shard_count
         self.encode_format = encode_format
-        shard_name = "{shard_id:0{oom_shard_count}d}".format(  # pylint: disable=consider-using-f-string
-            shard_id=shard_id, oom_shard_count=oom_shard_count
-        )
+        shard_name = shard_id
         output_file = f"{output_folder}/{shard_name}.parquet"
         self.pq_file = output_file
         self.buffered_parquet_writer = BufferedParquetWriter(output_file, schema, 100)
@@ -71,9 +70,20 @@ class ParquetSampleWriter:
         sample = {"key": key}
 
         sample["txt"] = str(caption) if caption is not None else ""
-
         sample.update(meta)
         self.buffered_parquet_writer.write(sample)
 
     def close(self):
         self.buffered_parquet_writer.close()
+
+
+class TarWriter:
+    def __init__(self, pattern):
+        self.pattern = pattern
+        self.sink = wds.TarWriter(pattern)
+
+    def write(self, sample):
+        self.sink.write(sample)
+
+    def close(self):
+        self.sink.close()
