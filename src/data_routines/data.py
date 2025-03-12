@@ -1,5 +1,4 @@
 import webdataset as wds
-import torch
 import logging
 from webdataset.tariterators import (
     base_plus_ext,
@@ -16,6 +15,13 @@ def filter_no_caption_or_no_image(sample):
         "png" in sample or "jpg" in sample or "jpeg" in sample or "webp" in sample
     )
     return has_caption and has_image
+
+
+def filter_no_image(sample):
+    has_image = (
+        "png" in sample or "jpg" in sample or "jpeg" in sample or "webp" in sample
+    )
+    return has_image
 
 
 def log_and_continue(exn):
@@ -83,20 +89,23 @@ def get_data_loader(
         [
             tarfile_to_samples_nothrow,
             wds.decode("pilrgb", handler=log_and_continue),
-            wds.rename(image="jpg;png;jpeg;webp", json=meta_key),
+            wds.select(filter_no_image),
+            wds.rename(
+                image="jpg;png;jpeg;webp", json=meta_key, handler=log_and_continue
+            ),
         ]
     )
 
     if filter_functions is not None:
         for filter_function in filter_functions:
-            pipeline.append(wds.select(filter_function))
+            pipeline.append(wds.select(filter_function, handler=log_and_continue))
 
     extra_keys = set()
     if mapper_functions is not None:
         for mapper_function in mapper_functions:
             output_key = mapper_function.config.output_key
             extra_keys.add(output_key)
-            pipeline.append(wds.map(mapper_function))
+            pipeline.append(wds.map(mapper_function, handler=log_and_continue))
 
     if convert_to_tuples:
         tuple_keys = ["image", "json", "__url__", "__key__"]
@@ -115,10 +124,11 @@ def get_data_loader(
     )
 
     dataset = wds.DataPipeline(*pipeline)
-    dataloader = torch.utils.data.DataLoader(
+    dataloader = wds.WebLoader(
         dataset,
         batch_size=None,
         num_workers=num_workers,
         collate_fn=lambda x: x,
+        persistent_workers=num_workers > 0,
     )
     return dataloader

@@ -1,10 +1,10 @@
-data_path: "/p/data1/mmlaion/laion_bvd/extracted_images_test/000-part-00001-c4778e33-5c8f-4681-aa83-d8837fc6294a-c000.snappy.parquet/"
-output_dir: "/p/data1/mmlaion/laion_bvd_recap/filtered_test"
+data_path: "/leonardo_work/EUHPC_E03_068/shared/datasets/datacomp/datacomp_1B/flat/"
+output_dir: "/leonardo_work/EUHPC_E03_068/marianna/laion_bvd_recap/datacomp_1b/filtered"
 batch_size: 32
-num_workers: 4
-meta_key: "info.json"
-img_key: "png"
-filter_functions: 
-  - type: mono
-    threshold: 0.5
-    is_monochromatic: false
+num_workers: 1
+meta_key: "json"
+img_key: "jpg"
+filter_functions: []
+  # - type: mono
+  #   threshold: 0.5
+  #   is_monochromatic: false

@@ -1,16 +1,16 @@
-data_path: "/p/data1/mmlaion/datacomp/datacomp_1B/flat"
-output_dir: "/p/data1/mmlaion/laion_bvd_recap/filtered_test"
-batch_size: 128
-num_workers: 4
+data_path: "/leonardo_work/EUHPC_E03_068/marianna/laion_bvd_recap/datacomp_1b/recaptioned_tars"
+output_dir: "/leonardo_work/EUHPC_E03_068/marianna/laion_bvd_recap/datacomp_1b/recaptioned_tars_short"
+batch_size: 64
+num_workers: 1
 meta_key: "json"
 img_key: "jpg"
-make_visualization: true
+make_visualization: false
 save_tar: true
 convert_to_tuples: false
 mapper_functions: 
 - type: add_fields
   input_key: "txt"
-  output_key: "new_caption"
-  metadata_path: "/p/data1/mmlaion/laion_bvd_recap/deepseek-ai/deepseek-vl2-tiny/"
-  data_path: "/p/data1/mmlaion/datacomp/datacomp_1B/flat"
+  output_key: "deepseek_caption"
+  metadata_path: "/leonardo_work/EUHPC_E03_068/marianna/laion_bvd_recap/datacomp_1b/deepseek-ai/deepseek-vl2-tiny/short_caption"
+  data_path: "/leonardo_work/EUHPC_E03_068/marianna/laion_bvd_recap/datacomp_1b/recaptioned_tars"
 

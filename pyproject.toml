@@ -14,7 +14,8 @@ dependencies = [
   "fire",
   "matplotlib",
   "pyarrow",
-  "fsspec"
+  "fsspec",
+  "pandas"
 ]
 
 readme = "README.md"

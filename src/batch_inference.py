@@ -19,6 +19,7 @@ from data_routines.data import get_data_loader
 from data_routines.writer import ParquetSampleWriter
 import logging
 import time
+import re
 
 logging.basicConfig(level=logging.INFO)
 
@@ -36,10 +37,10 @@ def cleanup_vllm(llm):
     torch.cuda.synchronize()
 
 
-def get_done_shards(tmp_dir):
+def get_done_shards(out_dir):
     done_shards = []
-    for f in os.listdir(tmp_dir):
-        if f.endswith(".feather"):
+    for f in os.listdir(out_dir):
+        if f.endswith(".parquet"):
             done_shards.append(f.split(".")[0])
     return done_shards
 
@@ -80,6 +81,9 @@ def get_clipscores(
     n_row = (
         len(images) // n_col if len(images) % n_col == 0 else len(images) // n_col + 1
     )
+
+    clip_scores = clip_score(captions, images)
+    captions = [f"{c} [{score:.2f}]" for c, score in zip(captions, clip_scores)]
     plot_grid(
         images,
         n_col,
@@ -88,13 +92,143 @@ def get_clipscores(
         orig_captions=None,
         fig_path=os.path.join(output_dir, f"{shard_id}.png"),
     )
+    # for i, score in enumerate(clip_scores):
+    #     metadata_pq.loc[i, "clip_score"] = score
 
-    clip_scores = clip_score(captions, images)
     avg_score = sum(clip_scores) / len(clip_scores)
     logging.info(f"Average CLIP score: {avg_score:.2f}")
+    # save the metadata with clip scores
+    # pq = pa.Table.from_pandas(metadata_pq)
+    # pq.write_table(os.path.join(output_dir, f"{shard_id}.parquet"))
+    return clip_scores
 
 
-@ray.remote(num_gpus=4, num_cpus=24)
+def clean_caption(caption):
+    # both closing and opening tags
+    html_tags = re.compile(r"<.*?>")
+    caption = re.sub(html_tags, "", caption)
+    # closing tags
+    closing_tags = re.compile(r"</.*?>")
+    caption = re.sub(closing_tags, "", caption)
+    # opening tags
+    caption = caption.replace("<", "").replace(">", "")
+    return caption
+
+
+@ray.remote
+class ShardProcessor:
+    def __init__(
+        self,
+        model_path,
+        output_dir,
+        tp,
+        backend,
+        compute_clip_score=False,
+        clip_model="openai/clip-vit-base-patch32",
+    ):
+        cuda_devices = torch.cuda.device_count()
+        print(f"Found {cuda_devices} cuda devices")
+        self.model_path = model_path
+        self.output_dir = output_dir
+        self.tp = tp
+        self.backend = backend
+        self.model = get_model(model_path, 0, backend, tp)
+        self.compute_clip_score = compute_clip_score
+        self.clip_model = clip_model
+
+    def process_shard(
+        self,
+        shard_id,
+        data_path,
+        prompt,
+        sampling_params,
+        batch_size,
+        num_workers,
+        img_key="image",
+        meta_key="info.json",
+    ):
+        dataloader = get_data_loader(
+            data_path,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            meta_key=meta_key,
+        )
+        schema = pa.schema(
+            [
+                pa.field("txt", pa.string()),
+                pa.field("prompt", pa.string()),
+                pa.field("url", pa.string()),
+                pa.field("key", pa.string()),
+            ]
+        )
+
+        base_name = os.path.basename(data_path).replace(".tar", "")
+        print(f"Processing shard: {base_name}")
+        writer = ParquetSampleWriter(
+            shard_id=base_name,
+            output_folder=self.output_dir,
+            save_caption=True,
+            oom_shard_count=0,
+            schema=schema,
+            encode_format="jpg",
+        )
+        batch_id = 0
+
+        for batch_id, (imgs, metas, urls, keys) in tqdm(enumerate(dataloader)):
+            inputs = [
+                {
+                    "prompt": prompt,
+                    "multi_modal_data": {
+                        "image": img,
+                    },
+                }
+                for img in imgs
+            ]
+            captions = self.model.generate(
+                inputs,
+                sampling_params=sampling_params,
+            )
+
+            captions = [c.outputs[0].text for c in captions]
+            captions = [clean_caption(c) for c in captions]
+            for i in range(len(imgs)):
+                meta_data = metas[i]
+                if "key" in meta_data:
+                    meta_data["key"] = keys[i]
+                meta_data["url"] = urls[i]
+                meta_data["prompt"] = prompt
+                writer.write(
+                    key=keys[i],
+                    caption=captions[i],
+                    meta=meta_data,
+                )
+
+        writer.close()
+
+        # if self.backend == "vllm":
+        #     cleanup_vllm(self.model)
+
+        if self.compute_clip_score:
+            get_clipscores(
+                data_path,
+                writer.pq_file,
+                meta_key=meta_key,
+                img_key=img_key,
+                output_dir=self.output_dir,
+                shard_id=shard_id,
+                clip_model=self.clip_model,
+            )
+
+        logging.info(f"Processed {batch_id + 1} batches")
+        logging.info(os.path.join(self.output_dir, f"{shard_id}.png"))
+
+        # tmp_dir = os.path.join(output_dir, "_tmp")
+
+        # with open(os.path.join(tmp_dir, f"{shard_id}.feather"), "w") as f:
+        #     f.write("done")
+
+
+@ray.remote
 def process_shard(
     shard_id,
     data_path,
@@ -139,6 +273,7 @@ def process_shard(
         schema=schema,
         encode_format="jpg",
     )
+    batch_id = 0
 
     for batch_id, (imgs, metas, urls, keys) in tqdm(enumerate(dataloader)):
         if debug and batch_id > 0:
@@ -153,13 +288,28 @@ def process_shard(
             }
             for img in imgs
         ]
-        captions = model.generate(
-            inputs,
-            sampling_params=sampling_params,
-        )
+        for i in range(3):
+            try:
+                captions = model.generate(
+                    inputs,
+                    sampling_params=sampling_params,
+                )
+                break
+            except Exception as e:
+                logging.error(
+                    f"Got error: {e} in shard: {shard_id}, {i + 1}/3 retrying..."
+                )
+                torch.cuda.empty_cache()
+                gc.collect()
+                time.sleep(1)
+
+                if i == 2:
+                    logging.error(f"Failed to generate captions for shard: {shard_id}")
+                    return
 
         torch.cuda.empty_cache()
         captions = [c.outputs[0].text for c in captions]
+        captions = [clean_caption(c) for c in captions]
         for i in range(len(imgs)):
             meta_data = metas[i]
             if "key" in meta_data:
@@ -190,13 +340,13 @@ def process_shard(
             clip_model=clip_model,
         )
 
-    logging.info(f"Processed {batch_id+1} batches")
+    logging.info(f"Processed {batch_id + 1} batches")
     logging.info(os.path.join(output_dir, f"{shard_id}.png"))
 
-    tmp_dir = os.path.join(output_dir, "_tmp")
+    # tmp_dir = os.path.join(output_dir, "_tmp")
 
-    with open(os.path.join(tmp_dir, f"{shard_id}.feather"), "w") as f:
-        f.write("done")
+    # with open(os.path.join(tmp_dir, f"{shard_id}.feather"), "w") as f:
+    #     f.write("done")
 
 
 def get_model(model_path, rank, backend="vllm", tensor_parallel_size=1):
@@ -217,8 +367,8 @@ def get_model(model_path, rank, backend="vllm", tensor_parallel_size=1):
             trust_remote_code=True,
             max_model_len=4096,
             tensor_parallel_size=tensor_parallel_size,
-            gpu_memory_utilization=0.98,
-            max_num_seqs=4,
+            gpu_memory_utilization=0.9,
+            max_num_seqs=32,
             **extra_args,
         )
     elif backend == "open_clip":
@@ -300,7 +450,7 @@ def batch_inference(
     tmp_dir = os.path.join(output_dir, "_tmp")
     os.makedirs(tmp_dir, exist_ok=True)
 
-    done_shards = get_done_shards(tmp_dir)
+    done_shards = get_done_shards(output_dir)
     print(done_shards)
 
     try:
@@ -308,35 +458,74 @@ def batch_inference(
     except ConnectionError:
         ray.init(include_dashboard=False)
 
-    futures = [
-        process_shard.options(num_gpus=num_gpus_per_task, num_cpus=10).remote(
-            shard_id=shard_id,
-            data_path=shards[shard_id],
+    print("ray resources", ray.available_resources())
+    ray_num_total_gpus = ray.available_resources().get("GPU", 0)
+    print("ray num total gpus", ray_num_total_gpus)
+
+    num_actors = int(ray_num_total_gpus // num_gpus_per_task)
+    print("num actors", num_actors)
+
+    actors = []
+
+    for i in range(num_actors):
+        shard_processor = ShardProcessor.options(
+            num_gpus=num_gpus_per_task, num_cpus=8
+        ).remote(
             model_path=model_path,
             output_dir=output_dir,
             tp=tp,
-            prompt=prompt,
-            img_key=img_key,
-            meta_key=meta_key,
-            sampling_params=sampling_params,
             backend=backend,
             compute_clip_score=compute_clip_score,
             clip_model=clip_model,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            debug=debug,
         )
-        for shard_id in range(len(shards))
-        if f"{shard_id}" not in done_shards
-    ]
+        actors.append(shard_processor)
 
+    # futures = [
+    #     process_shard.options(num_gpus=num_gpus_per_task, num_cpus=8).remote(
+    #         shard_id=shard_id,
+    #         data_path=shards[shard_id],
+    #         model_path=model_path,
+    #         output_dir=output_dir,
+    #         tp=tp,
+    #         prompt=prompt,
+    #         img_key=img_key,
+    #         meta_key=meta_key,
+    #         sampling_params=sampling_params,
+    #         backend=backend,
+    #         compute_clip_score=compute_clip_score,
+    #         clip_model=clip_model,
+    #         batch_size=batch_size,
+    #         num_workers=num_workers,
+    #         debug=debug,
+    #     )
+    #     for shard_id in range(len(shards))
+    #     if os.path.basename(shards[shard_id]).replace(".tar", "") not in done_shards
+    # ]
+
+    futures = []
+    for shard_id in range(len(shards)):
+        if os.path.basename(shards[shard_id]).replace(".tar", "") not in done_shards:
+            actor_id = shard_id % len(actors)
+            shard_processor = actors[actor_id]
+            futures.append(
+                shard_processor.process_shard.remote(
+                    shard_id=shard_id,
+                    data_path=shards[shard_id],
+                    prompt=prompt,
+                    sampling_params=sampling_params,
+                    batch_size=batch_size,
+                    num_workers=num_workers,
+                    meta_key=meta_key,
+                    img_key=img_key,
+                )
+            )
     ray.get(futures)
 
     ray.shutdown()
     shutil.rmtree(tmp_dir)
 
     e = time.time()
-    logging.info(f"Total time: {e-s:.2f}s")
+    logging.info(f"Total time: {e - s:.2f}s")
 
 
 if __name__ == "__main__":

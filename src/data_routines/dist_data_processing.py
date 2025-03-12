@@ -11,6 +11,7 @@ from .filters import FILTERS
 from .mappers import MAPPERS
 from .writer import ParquetSampleWriter, TarWriter
 from visualization import plot_grid
+import logging
 
 
 @dataclasses.dataclass
@@ -69,6 +70,7 @@ def process_shard(
     mappers = []
     if config.mapper_functions is None:
         config.mapper_functions = []
+
     for mf in config.mapper_functions:
         mapper_type = mf["type"]
         mapper = MAPPERS[mapper_type]
@@ -76,8 +78,6 @@ def process_shard(
         mapper_config.data_path = shard_path
         mapper_fn = mapper["mapper"](mapper_config)
         mappers.append(mapper_fn)
-
-    print(shard_path)
 
     dataloader = get_data_loader(
         data_path=shard_path,
@@ -98,50 +98,59 @@ def process_shard(
 
     print("tar_writer", tar_writer)
 
-    for batch_id, batch in enumerate(dataloader):
-        if isinstance(batch, tuple):
-            imgs, metas, _, keys = batch[0], batch[1], batch[2], batch[3]
-        else:
-            imgs, metas, _, keys = (
-                batch["image"],
-                batch["json"],
-                batch["__url__"],
-                batch["__key__"],
-            )
-        if debug and batch_id > 0:
-            break
-        print(f"Processing batch: {batch_id}")
-        if config.make_visualization and batch_id == 0:
-            # imgs = [b[0] for b in batch]
-            rows = len(imgs) // 4
-            cols = 4
-            captions = keys
+    try:
+        for batch_id, batch in enumerate(dataloader):
+            if isinstance(batch, tuple):
+                imgs, metas, _, keys = batch[0], batch[1], batch[2], batch[3]
+            else:
+                imgs, metas, _, keys = (
+                    batch["image"],
+                    batch["json"],
+                    batch["__url__"],
+                    batch["__key__"],
+                )
+            if debug and batch_id > 0:
+                break
+            print(f"Processing batch: {batch_id}")
+            if config.make_visualization and batch_id == 0:
+                # imgs = [b[0] for b in batch]
+                rows = len(imgs) // 4
+                cols = 4
+                captions = keys
 
-            fig_path = os.path.join(output_dir, f"shard_{shard_id}.png")
-            plot_grid(
-                imgs,
-                rows,
-                cols,
-                captions,
-                orig_captions=None,
-                figsize=(20, 12),
-                fig_path=fig_path,
-            )
-            print(f"Saved visualization to {fig_path}")
+                fig_path = os.path.join(output_dir, f"shard_{shard_id}.png")
+                plot_grid(
+                    imgs,
+                    rows,
+                    cols,
+                    captions,
+                    orig_captions=None,
+                    figsize=(20, 12),
+                    fig_path=fig_path,
+                )
+                print(f"Saved visualization to {fig_path}")
 
-        for key, meta in zip(keys, metas):
-            writer.write(key, meta[txt_key] if txt_key else None, meta)
+            for key, meta in zip(keys, metas):
+                writer.write(key, meta[txt_key] if txt_key else None, meta)
 
-        # if tar_writer is not None:
-        print(f"Writing to tar {output_tar}")
+            if tar_writer is not None:
+                print(f"Writing to tar {output_tar}")
 
-        if isinstance(batch, dict):
-            batch_list = [dict(zip(batch, t)) for t in zip(*batch.values())]
-            for sample in batch_list:
-                sample[img_key] = sample.pop("image")
-                sample[meta_key] = sample.pop("json")
-                tar_writer.write(sample)
-        # tar_writer.write(batch)
+                if isinstance(batch, dict):
+                    batch_list = [dict(zip(batch, t)) for t in zip(*batch.values())]
+                    for sample in batch_list:
+                        sample[img_key] = sample.pop("image")
+                        sample[meta_key] = sample.pop("json")
+                        tar_writer.write(sample)
+
+    except Exception:
+        print(f"Error processing shard {shard_id}")
+        # remove tar file if it exists
+        if config.save_tar:
+            os.remove(output_tar)
+        # remove parquet file if it exists
+        os.remove(writer.parquet_path)
+        return
 
     writer.close()
     if tar_writer is not None:
@@ -167,6 +176,20 @@ def main(
 
     output_dir = data_config.output_dir
     os.makedirs(output_dir, exist_ok=True)
+
+    done_shards = glob.glob(os.path.join(output_dir, "*.parquet")) + glob.glob(
+        os.path.join(output_dir, "*.tar")
+    )
+
+    done_shards = [os.path.basename(shard).split(".")[0] for shard in done_shards]
+    done_shards = set(done_shards)
+    shards = [
+        shard
+        for shard in shards
+        if os.path.basename(shard).split(".")[0] not in done_shards
+    ]
+
+    logging.info(f"Processing {len(shards)} shards")
     try:
         ray.init(address="auto", include_dashboard=False)
     except ConnectionError:
