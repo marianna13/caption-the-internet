@@ -59,7 +59,7 @@ def get_clipscores(
 
     clip_score = ClipScoreProcessor(clip_model)
     dataloader = get_data_loader(
-        data_path, batch_size=batch_size, num_workers=4, meta_key=meta_key
+        data_path, batch_size=batch_size, num_workers=1, meta_key=meta_key
     )
 
     metadata_pq = pa.parquet.read_table(parquet_path).to_pandas()
@@ -81,22 +81,26 @@ def get_clipscores(
     n_row = (
         len(images) // n_col if len(images) % n_col == 0 else len(images) // n_col + 1
     )
+    try:
+        clip_scores = clip_score(captions, images)
+        captions = [f"{c} [{score:.2f}]" for c, score in zip(captions, clip_scores)]
+        plot_grid(
+            images,
+            n_col,
+            n_row,
+            captions,
+            orig_captions=None,
+            fig_path=os.path.join(output_dir, f"{shard_id}.png"),
+        )
+        # for i, score in enumerate(clip_scores):
+        #     metadata_pq.loc[i, "clip_score"] = score
 
-    clip_scores = clip_score(captions, images)
-    captions = [f"{c} [{score:.2f}]" for c, score in zip(captions, clip_scores)]
-    plot_grid(
-        images,
-        n_col,
-        n_row,
-        captions,
-        orig_captions=None,
-        fig_path=os.path.join(output_dir, f"{shard_id}.png"),
-    )
-    # for i, score in enumerate(clip_scores):
-    #     metadata_pq.loc[i, "clip_score"] = score
+        avg_score = sum(clip_scores) / len(clip_scores)
+        logging.info(f"Average CLIP score: {avg_score:.2f}")
 
-    avg_score = sum(clip_scores) / len(clip_scores)
-    logging.info(f"Average CLIP score: {avg_score:.2f}")
+    except Exception as e:
+        logging.error(f"Error computing CLIP scores: {e}")
+        clip_scores = [0] * len(images)
     # save the metadata with clip scores
     # pq = pa.Table.from_pandas(metadata_pq)
     # pq.write_table(os.path.join(output_dir, f"{shard_id}.parquet"))
@@ -115,6 +119,9 @@ def clean_caption(caption):
     return caption
 
 
+
+
+
 @ray.remote
 class ShardProcessor:
     def __init__(
@@ -125,6 +132,10 @@ class ShardProcessor:
         backend,
         compute_clip_score=False,
         clip_model="openai/clip-vit-base-patch32",
+        language_only=False,
+        language_only_key="txt",
+        debug=False,
+        max_model_len=4096,
     ):
         cuda_devices = torch.cuda.device_count()
         print(f"Found {cuda_devices} cuda devices")
@@ -132,9 +143,32 @@ class ShardProcessor:
         self.output_dir = output_dir
         self.tp = tp
         self.backend = backend
-        self.model = get_model(model_path, 0, backend, tp)
+        self.max_model_len = max_model_len
+        self.model = get_model(model_path, 0, backend, tp, max_model_len=self.max_model_len)
         self.compute_clip_score = compute_clip_score
         self.clip_model = clip_model
+        self.language_only = language_only
+        self.language_only_key = language_only_key
+        self.debug = debug
+
+        assert self.backend in ["vllm", "open_clip"], "Unknown backend, must be vllm or open_clip"
+        if self.language_only:
+            assert self.language_only and backend == "vllm", "Language only is only supported for VLLM"
+        assert self.language_only is False or self.language_only_key is not None, "Language only key must be provided if language only is True"
+
+        self.tokenizer = self.model.get_tokenizer() if self.backend == "vllm" else None
+
+
+    def format_prompt_language_only(self, prompt, txt_data):
+        prompt = prompt.format(txt=txt_data)
+        # prompt = self.tokenizer.apply_chat_template([
+        #     {
+        #         "role": "user",
+        #         "content": prompt,
+        #     }
+        # ]
+        # )
+        return prompt
 
     def process_shard(
         self,
@@ -175,14 +209,18 @@ class ShardProcessor:
         batch_id = 0
 
         for batch_id, (imgs, metas, urls, keys) in tqdm(enumerate(dataloader)):
+            if self.debug and batch_id > 0:
+                break
+            prompt = prompt.format(txt=metas[i][self.language_only_key]) if self.language_only_key else prompt
+            prompt = prompt[:self.max_model_len]
             inputs = [
                 {
                     "prompt": prompt,
                     "multi_modal_data": {
                         "image": img,
                     },
-                }
-                for img in imgs
+                } if not self.language_only else self.format_prompt_language_only(prompt, metas[i][self.language_only_key])
+                for i, img in enumerate(imgs)
             ]
             captions = self.model.generate(
                 inputs,
@@ -349,7 +387,7 @@ def process_shard(
     #     f.write("done")
 
 
-def get_model(model_path, rank, backend="vllm", tensor_parallel_size=1):
+def get_model(model_path, rank, backend="vllm", tensor_parallel_size=1, max_model_len=4096):
     """
     Get the model based on the backend
 
@@ -365,7 +403,7 @@ def get_model(model_path, rank, backend="vllm", tensor_parallel_size=1):
         model = LLM(
             model=model_path,
             trust_remote_code=True,
-            max_model_len=4096,
+            max_model_len=max_model_len,
             tensor_parallel_size=tensor_parallel_size,
             gpu_memory_utilization=0.9,
             max_num_seqs=32,
@@ -399,6 +437,8 @@ def batch_inference(
     debug: bool = False,
     limit: int = None,
     shuffle_shards: bool = False,
+    language_only: bool = False,
+    language_only_key: str = None,
 ):
     """
     Run batch inference on a dataset
@@ -435,7 +475,7 @@ def batch_inference(
 
     if backend == "vllm":
         sampling_params = SamplingParams(**sampling_params)
-        prompt_func = PROMPT_MAP["/".join(model_path.split("/")[-2:])]
+        prompt_func = PROMPT_MAP.get("/".join(model_path.split("/")[-2:]), lambda x: x)
         prompt = prompt_func(prompt)
 
     shards = glob.glob(f"{data_path}/*.tar")
@@ -477,6 +517,8 @@ def batch_inference(
             backend=backend,
             compute_clip_score=compute_clip_score,
             clip_model=clip_model,
+            language_only=language_only,
+            language_only_key=language_only_key
         )
         actors.append(shard_processor)
 
